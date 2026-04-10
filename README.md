@@ -8,8 +8,8 @@
 |------|------|------|
 | `install_transit_v3.1.sh` | v3.6 | 中转机安装脚本（Transit） |
 | `install_landing_v3.1.sh` | v3.6 | 落地机安装脚本（Landing） |
-| `zhongzhuan.sh` | v2.50-Optimized | 原始中转机脚本 |
-| `luodi.sh` | v2.50 | 原始落地机脚本 |
+| `original/zhongzhuan.sh` | v2.50-Optimized | 原始中转机脚本 |
+| `original/luodi.sh` | v2.50 | 原始落地机脚本 |
 
 ## 版本差异（v2.50 → v3.6）
 
@@ -37,6 +37,7 @@
 - `LANDING_PORT` / `transit_ips` 运行时动态读取
 - cert-reload sync + 完整性校验
 - Xray SHA256 重试 + ELF 验证
+- nginx_reload 4 层 fallback
 
 ## 使用方法
 
