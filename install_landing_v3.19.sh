@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.19"
+readonly VERSION="v3.20"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -647,7 +647,7 @@ optimize_kernel_network(){
 
   local _fd_max=$(( _ram_mb * 800 ))
   (( _fd_max < 524288 ))   && _fd_max=524288
-  (( _fd_max > 10485760 )) && _fd_max=10485760
+  (( _fd_max > 1048576 )) && _fd_max=1048576
 
   atomic_write "$bbr_conf" 644 root:root <<BBRCF
 net.netfilter.nf_conntrack_max=1048576
@@ -756,7 +756,7 @@ _tune_nginx_worker_connections(){
   local _tmc_ram_mb; _tmc_ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _tmc_ram_mb=1024
   local _tmc_fd=$(( _tmc_ram_mb * 800 ))
   (( _tmc_fd < 524288 ))   && _tmc_fd=524288
-  (( _tmc_fd > 10485760 )) && _tmc_fd=10485760
+  (( _tmc_fd > 1048576 )) && _tmc_fd=1048576
 
   if ! grep -qE '^\s*worker_connections\s+100000\s*;' "$mc" 2>/dev/null; then
     if grep -qE '^\s*worker_connections' "$mc" 2>/dev/null; then
@@ -1246,7 +1246,7 @@ create_systemd_service(){
   local _svc_ram_mb; _svc_ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _svc_ram_mb=1024
   local _svc_fd=$(( _svc_ram_mb * 800 ))
   (( _svc_fd < 524288 ))   && _svc_fd=524288
-  (( _svc_fd > 10485760 )) && _svc_fd=10485760
+  (( _svc_fd > 1048576 )) && _svc_fd=1048576
 
   local _svc_tmp; _svc_tmp="$(_mktemp "svc" 3)"
   

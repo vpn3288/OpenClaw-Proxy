@@ -8,7 +8,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.19"
+readonly VERSION="v3.20"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -525,7 +525,7 @@ optimize_kernel_network(){
 
   local _fd_max=$(( _ram_mb * 800 ))
   (( _fd_max < 524288 ))   && _fd_max=524288
-  (( _fd_max > 10485760 )) && _fd_max=10485760
+  (( _fd_max > 1048576 )) && _fd_max=1048576
 
   atomic_write "$bbr_conf" 644 root:root <<BBRCF
 net.netfilter.nf_conntrack_max=1048576
@@ -605,7 +605,7 @@ _tune_nginx_worker_connections(){
   local _tune_ram_mb; _tune_ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _tune_ram_mb=1024
   local _tune_fd=$(( _tune_ram_mb * 800 ))
   (( _tune_fd < 524288 ))   && _tune_fd=524288
-  (( _tune_fd > 10485760 )) && _tune_fd=10485760
+  (( _tune_fd > 1048576 )) && _tune_fd=1048576
 
   local _wc_ram; _wc_ram=$(free -m 2>/dev/null | awk '/Mem:/{print int($2/2*1000)}') || _wc_ram=100000
   (( _wc_ram < 10000 )) && _wc_ram=10000
@@ -1306,7 +1306,6 @@ delete_landing_route(){
   # 1. 删除 map 文件（nginx 配置）
   remove_landing_snippet "$DEL_DOMAIN"
   # 2. 删除 .meta 文件（真相源），这是真正的节点删除
-  rm -f "${CONF_DIR}/${safe_del}.meta" 2>/dev/null || true
   # 3. 重载 nginx 使路由彻底失效
   nginx_reload
   # [Bugfix v3.12] 删除节点后刷新防火墙，清除该 IP 的 ACCEPT 规则
