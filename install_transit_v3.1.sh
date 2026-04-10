@@ -667,17 +667,22 @@ setup_fallback_decoy_transit(){
     die "端口 45231 已被占用"
   fi
   
-  local need_ipv6=0; have_ipv6 && need_ipv6=1
+  # [Bugfix v3.25] 只在有全局 IPv6 地址时启用 IPv6 fallback（排除 loopback/link-local）
+  local need_ipv6=0
+  if have_ipv6 && ip -6 addr show 2>/dev/null | awk '/inet6/ && !/::1/ && !/fe80:/ {exit 0} END {exit 1}' 2>/dev/null; then
+    need_ipv6=1
+  fi
   local ipv6_listen=""
-  (( need_ipv6 )) && ipv6_listen="    listen [::1]:45231 ssl; ssl_reject_handshake on;"
-  
+  (( need_ipv6 )) && ipv6_listen="    listen [::1]:45231 ssl;"
+
   rm -f "/etc/nginx/conf.d/transit-tls-reject.conf" 2>/dev/null || true
-  
+
   atomic_write "$fallback_conf" 644 root:root <<FDEOF
 limit_conn_zone \$binary_remote_addr zone=transit_fb_conn:10m;
 limit_req_zone  \$binary_remote_addr zone=transit_fb_req:10m rate=10r/s;
 server {
-    listen 127.0.0.1:45231 ssl; ssl_reject_handshake on;
+    ssl_reject_handshake on;
+    listen 127.0.0.1:45231 ssl;
 ${ipv6_listen}
     server_name _;
     server_tokens off;

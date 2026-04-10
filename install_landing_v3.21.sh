@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.24"
+readonly VERSION="v3.25"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -689,7 +689,7 @@ install_xray_binary(){
   esac
 
   local zip_name="Xray-linux-${arch_name}.zip"
-  local tmp_dir; tmp_dir="$(_mktemp "xray-dl" 60)"
+  local tmp_dir; tmp_dir="$(mktemp -d /tmp/xray-dl.XXXXXX)"
   mkdir -p "$tmp_dir"
 
   # 下载 Xray + SHA256 完整性校验（失败自动重试）
@@ -1838,6 +1838,13 @@ purge_all(){
         env ACME_HOME="$ACME_HOME" "${ACME_HOME}/acme.sh" --home "$ACME_HOME" --remove --domain "$dom" --ecc 2>/dev/null || true
       }
     done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -type f 2>/dev/null | sort)
+  fi
+
+  # [Bugfix v3.25] 清理 Xray 二进制、数据文件、用户
+  rm -f "$LANDING_BIN"
+  rm -rf /usr/local/share/xray-landing
+  if id "$LANDING_USER" &>/dev/null; then
+    userdel "$LANDING_USER" 2>/dev/null || true
   fi
 
   rm -rf "$LANDING_BASE" "$MANAGER_BASE"

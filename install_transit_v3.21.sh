@@ -8,7 +8,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.24"
+readonly VERSION="v3.25"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -663,11 +663,15 @@ setup_fallback_decoy_transit(){
     die "端口 45231 已被占用"
   fi
 
-  local need_ipv6=0; have_ipv6 && need_ipv6=1
-  local ipv6_listen=""
-  (( need_ipv6 )) && ipv6_listen="    listen [::1]:45231 ssl; ssl_reject_handshake on;"
-    local ipv6_listen_directive=""
-    (( need_ipv6 )) && ipv6_listen_directive="    listen [::]:${LISTEN_PORT} fastopen=256 so_keepalive=3m:10s:3 backlog=65535;"
+  # [Bugfix v3.25] 只在有全局 IPv6 地址时启用 IPv6 fallback（排除 loopback/link-local）
+  local need_ipv6=0
+  if have_ipv6 && ip -6 addr show 2>/dev/null | awk '/inet6/ && !/::1/ && !/fe80:/ {exit 0} END {exit 1}' 2>/dev/null; then
+    need_ipv6=1
+  fi
+  ipv6_listen=""
+  (( need_ipv6 )) && ipv6_listen="    listen [::1]:45231 ssl;"
+  ipv6_listen_directive=""
+  (( need_ipv6 )) && ipv6_listen_directive="    listen [::]:${LISTEN_PORT} fastopen=256 so_keepalive=3m:10s:3 backlog=65535;"
 
   rm -f "/etc/nginx/conf.d/transit-tls-reject.conf" 2>/dev/null || true
 
@@ -675,7 +679,8 @@ setup_fallback_decoy_transit(){
 limit_conn_zone \$binary_remote_addr zone=transit_fb_conn:10m;
 limit_req_zone  \$binary_remote_addr zone=transit_fb_req:10m rate=10r/s;
 server {
-    listen 127.0.0.1:45231 ssl; ssl_reject_handshake on;
+    ssl_reject_handshake on;
+    listen 127.0.0.1:45231 ssl;
 ${ipv6_listen}
     server_name _;
     server_tokens off;
