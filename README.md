@@ -6,14 +6,14 @@
 
 | 文件 | 版本 | 说明 |
 |------|------|------|
-| `install_transit_v3.1.sh` | v3.6 | 中转机安装脚本（Transit） |
-| `install_landing_v3.1.sh` | v3.6 | 落地机安装脚本（Landing） |
+| `install_transit_v3.1.sh` | v3.7 | 中转机安装脚本（Transit） |
+| `install_landing_v3.1.sh` | v3.7 | 落地机安装脚本（Landing） |
 | `original/zhongzhuan.sh` | v2.50-Optimized | 原始中转机脚本 |
 | `original/luodi.sh` | v2.50 | 原始落地机脚本 |
 
-## 版本差异（v2.50 → v3.6）
+## 版本差异（v2.50 → v3.7）
 
-### 修复的 Bug
+### 修复的 Bug（共 14 个）
 
 | # | 问题 | 严重程度 |
 |---|------|---------|
@@ -28,6 +28,9 @@
 | 9 | boot 脚本 transit_ips hardcoded | 🟡 中 |
 | 10 | Xray 下载无重试+无 ELF 验证 | 🟡 中 |
 | 11 | nginx_reload 无 4 层 fallback | 🟡 低 |
+| 12 | `delete_node()` 只删备份不删实际文件（内存泄漏） | 🟡 中 |
+| 13 | `generate_nodes()` 旧版 Token 直接跳过（静默丢节点） | 🟡 低 |
+| 14 | LANDING_BASE export 缺失（Python NameError） | 🔴 高 |
 
 ### 新增功能
 

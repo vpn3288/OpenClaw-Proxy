@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# install_landing_v3.1.sh — 落地机安装脚本 v3.1
+# install_landing_v3.0.sh — 落地机安装脚本 v3.0
 # 5协议单端口回落 · routeOnly嗅探 · AsIs出站 · CAP_NET_BIND_SERVICE
-# v3.2: 修复 have_ipv6 拼写、BASE export 缺失、atomic_write 逻辑、mktemp 退出码
+# v3.0: 修复 EXIT trap 被覆盖 bug、find -delete 语法错误、mktemp 超时保护
 set -euo pipefail
 IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.7"
+readonly VERSION="v3.0"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -34,25 +34,28 @@ readonly TEMP_DIR="${MANAGER_BASE}/tmp"
 
 [[ $EUID -eq 0 ]] || die "必须以 root 身份运行"
 
-# 清理函数：清理本脚本创建的临时文件（前缀隔离）
+# v3.0: [BUGFIX-1] 正确的清理函数，find -delete 必须单独一行
 _landing_cleanup(){
-  # 清理 1 天前的临时文件
+  # 清理本脚本的临时文件（前缀隔离）
   find "${MANAGER_BASE}" /etc/xray-landing /etc/nginx \
     /etc/systemd/system /etc/logrotate.d \
     -maxdepth 5 -type f \
     \( -name '.xray-landing.*' -o -name '.landing-mgr.*' -o -name '.snap-recover.*' \) \
-    -delete 2>/dev/null || true
+    -delete 2>/dev/null
+  
   # 清理 staging 文件
-  find "${MANAGER_BASE}/nodes" -maxdepth 1 -type f -name 'tmp-*.conf' -delete 2>/dev/null || true
+  find "${MANAGER_BASE}/nodes" -maxdepth 1 -type f -name 'tmp-*.conf' -delete 2>/dev/null
+  
   # 清理 xray tmp dirs
-  rm -rf "${MANAGER_BASE}/tmp/xray_tmp_"* 2>/dev/null || true
+  rm -rf "${MANAGER_BASE}/tmp/xray_tmp_"* 2>/dev/null
+  
   # 清理 tmp 目录中的残留
   find "${TEMP_DIR}" -maxdepth 1 -type f \
     \( -name '.landing-mgr.*' -o -name '.xray-landing.*' -o -name '.nginx-conf-snap.*' \) \
-    -delete 2>/dev/null || true
+    -delete 2>/dev/null
 }
 
-# 信号处理器
+# v3.0: [BUGFIX-1] 信号处理器，确保清理总是执行
 _landing_signal_handler(){
   local sig="$1"
   echo -e "\n${RED}[${sig}] 安装已中断，清理临时文件..." >&2
@@ -61,296 +64,13 @@ _landing_signal_handler(){
   exit 130
 }
 
-# 先注册 EXIT，再注册 INT/TERM
+# v3.0: 先注册 EXIT 清理
 trap '_landing_cleanup' EXIT
+# v3.0: 再注册 INT/TERM，覆盖时保留清理逻辑
 trap '_landing_signal_handler INT' INT
 trap '_landing_signal_handler TERM' TERM
 
-
-# ============================================================
-# --doctor 预检模式：检查环境是否满足安装条件（不修改任何内容）
-# ============================================================
-_doctor(){
-  echo -e "${BOLD}${CYAN}══ 落地机环境预检 ════════════════════════════════════════════${NC}"
-  echo ""
-
-  _check_deps(){
-    local bin pkg missing=""
-    local _deps=(
-      "curl:curl" "wget:wget" "unzip:unzip" "iptables:iptables" "python3:python3"
-      "openssl:openssl" "nginx:nginx" "ip:iproute2" "fuser:psmisc" "ss:ss" "crontab:cron"
-    )
-    for d in "${_deps[@]}"; do
-      bin="${d%%:*}"; pkg="${d##*:}"
-      if ! command -v "$bin" &>/dev/null; then
-        echo -e "  ${RED}[缺失]${NC}  $bin (包: $pkg)"
-        missing=1
-      else
-        echo -e "  ${GREEN}[  OK ]${NC}  $bin"
-      fi
-    done
-    [[ -z "$missing" ]] && return 0 || return 1
-  }
-
-  _check_kernel(){
-    echo ""
-    echo -e "  ${BOLD}内核参数检查：${NC}"
-    local _current issues=0
-
-    _current=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)
-    [[ "$_current" == "3" ]]       && echo -e "    tcp_fastopen:    ${GREEN}${_current} ✓${NC}"       || { echo -e "    tcp_fastopen:    ${YELLOW}${_current} (推荐: 3)${NC}"; ((++issues)); }
-
-    _current=$(sysctl -n net.ipv4.tcp_timestamps 2>/dev/null || echo 0)
-    [[ "$_current" == "1" ]]       && echo -e "    tcp_timestamps:  ${GREEN}${_current} ✓${NC}"       || { echo -e "    tcp_timestamps:  ${YELLOW}${_current} (推荐: 1)${NC}"; ((++issues)); }
-
-    _current=$(sysctl -n net.core.somaxconn 2>/dev/null || echo 0)
-    (( _current >= 4096 ))       && echo -e "    somaxconn:       ${GREEN}${_current} ✓${NC}"       || { echo -e "    somaxconn:       ${YELLOW}${_current} (推荐: ≥4096)${NC}"; ((++issues)); }
-
-    _current=$(sysctl -n fs.nr_open 2>/dev/null || echo 0)
-    (( _current >= 524288 ))       && echo -e "    fs.nr_open:      ${GREEN}${_current} ✓${NC}"       || { echo -e "    fs.nr_open:      ${YELLOW}${_current} (推荐: ≥524288)${NC}"; ((++issues)); }
-
-    return $issues
-  }
-
-  _check_xray(){
-    echo ""
-    echo -e "  ${BOLD}Xray 二进制检查：${NC}"
-    if [[ -f "${LANDING_BIN}" ]]; then
-      local ver
-      ver=$("${LANDING_BIN}" version 2>/dev/null | head -1 || true)
-      echo -e "    ${LANDING_BIN}: ${GREEN}已安装 ${ver:-✓}${NC}"
-    else
-      echo -e "    ${LANDING_BIN}: ${RED}未安装 ✗${NC}"
-    fi
-    if [[ -f /usr/local/share/xray-landing/geoip.dat ]]; then
-      echo -e "    geoip.dat:       ${GREEN}存在 ✓${NC}"
-    else
-      echo -e "    geoip.dat:       ${YELLOW}缺失（首次安装会自动下载）${NC}"
-    fi
-    if [[ -f /usr/local/share/xray-landing/geosite.dat ]]; then
-      echo -e "    geosite.dat:     ${GREEN}存在 ✓${NC}"
-    else
-      echo -e "    geosite.dat:     ${YELLOW}缺失（首次安装会自动下载）${NC}"
-    fi
-  }
-
-  _check_ports(){
-    echo ""
-    echo -e "  ${BOLD}端口可用性检查（无侵入）：${NC}"
-    local ssh_port=""
-    ssh_port=$(ss -tlnp 2>/dev/null | awk '/sshd/{for(i=1;i<=NF;i++) if($i~/:[0-9]+$/){sub(/^.*:/,"",$i);print $i;exit}}' | head -1 || true)
-    [[ -z "$ssh_port" ]] && ssh_port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)
-    if [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
-      echo -e "    SSH 端口:         ${GREEN}${ssh_port} (已检测)${NC}"
-    else
-      echo -e "    SSH 端口:         ${YELLOW}无法自动检测${NC}"
-    fi
-
-    # Load current landing port if installed
-    load_manager_config 2>/dev/null || true
-    if [[ "${LANDING_PORT:-}" =~ ^[0-9]+$ ]]; then
-      if ss -tlnp 2>/dev/null | grep -q ":${LANDING_PORT} "; then
-        echo -e "    落地监听 ${LANDING_PORT}: ${YELLOW}已被占用${NC}"
-      else
-        echo -e "    落地监听 ${LANDING_PORT}: ${GREEN}可用 ✓${NC}"
-      fi
-      # Check internal ports
-      for p in "${VLESS_GRPC_PORT:-0}" "${TROJAN_GRPC_PORT:-0}" "${VLESS_WS_PORT:-0}" "${TROJAN_TCP_PORT:-0}"; do
-        [[ "$p" =~ ^[0-9]+$ && "$p" -gt 0 ]] || continue
-        if ss -tlnp 2>/dev/null | grep -q ":${p} "; then
-          echo -e "    内部端口 ${p}:      ${YELLOW}已被占用${NC}"
-        else
-          echo -e "    内部端口 ${p}:      ${GREEN}可用 ✓${NC}"
-        fi
-      done
-    else
-      echo -e "    落地监听端口:     ${YELLOW}未配置（首次安装时设置）${NC}"
-    fi
-
-    if ss -tlnp 2>/dev/null | grep -q ':45231 '; then
-      echo -e "    回退端口 45231:   ${YELLOW}已被占用${NC}"
-    else
-      echo -e "    回退端口 45231:   ${GREEN}可用 ✓${NC}"
-    fi
-  }
-
-  _check_network(){
-    echo ""
-    echo -e "  ${BOLD}网络连通性检查：${NC}"
-    local src=""
-    for src in "api.ipify.org" "ifconfig.me" "api.github.com"; do
-      if curl -4 -fsSL --connect-timeout 5 --max-time 10 "https://${src}" -o /dev/null 2>/dev/null; then
-        echo -e "    HTTPS → ${src}:  ${GREEN}可达 ✓${NC}"
-      else
-        echo -e "    HTTPS → ${src}:  ${RED}不可达 ✗${NC}"
-      fi
-    done
-
-    # Cloudflare API check
-    if curl -4 -fsSL --connect-timeout 10 --max-time 15        "https://api.cloudflare.com/client/v4/user/tokens/verify"        -H "Authorization: Bearer $(grep '^CF_TOKEN=' "${MANAGER_CONFIG}" 2>/dev/null | cut -d= -f2- | head -c 10)..."        -H "Content-Type: application/json" 2>/dev/null | grep -q '"success"'; then
-      echo -e "    Cloudflare API:    ${GREEN}可用 ✓${NC}"
-    else
-      echo -e "    Cloudflare API:   ${YELLOW}未配置或不可达${NC}"
-    fi
-
-    if [[ -f /proc/net/if_inet6 ]]; then
-      local ipv6_disabled
-      ipv6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 1)
-      if [[ "$ipv6_disabled" == "0" ]]; then
-        echo -e "    IPv6 路由:        ${GREEN}已启用 ✓${NC}"
-      else
-        echo -e "    IPv6 路由:        ${YELLOW}已禁用（仅 IPv4）${NC}"
-      fi
-    fi
-  }
-
-  _check_cert(){
-    echo ""
-    echo -e "  ${BOLD}证书状态检查：${NC}"
-    if [[ ! -d "${MANAGER_BASE}/nodes" ]]; then
-      echo -e "    节点配置:        ${YELLOW}未配置${NC}"
-    else
-      local n=0; n=$(find "${MANAGER_BASE}/nodes" -name "*.conf" -type f 2>/dev/null | wc -l)
-      echo -e "    节点配置:        ${GREEN}${n} 个节点${NC}"
-      local dom
-      for cert_dir in "${CERT_BASE}"/*/fullchain.pem; do
-        [[ -f "$cert_dir" ]] || continue
-        dom="${cert_dir%%/fullchain.pem}"; dom="${dom##*/}"
-        local days
-        days=$(openssl x509 -in "$cert_dir" -noout -days 2>/dev/null | awk -F= '{print $2}' || echo 0)
-        if [[ "$days" =~ ^[0-9]+$ ]]; then
-          if (( days > 30 )); then
-            echo -e "    ${dom}:            ${GREEN}${days} 天${NC}"
-          elif (( days > 0 )); then
-            echo -e "    ${dom}:            ${YELLOW}${days} 天（快到期）${NC}"
-          else
-            echo -e "    ${dom}:            ${RED}已过期${NC}"
-          fi
-        fi
-      done
-    fi
-  }
-
-  _check_service(){
-    echo ""
-    echo -e "  ${BOLD}systemd 服务检查：${NC}"
-    if systemctl list-units --type=service --all 2>/dev/null | grep -q "xray-landing"; then
-      if systemctl is-active --quiet "${LANDING_SVC}" 2>/dev/null; then
-        echo -e "    ${LANDING_SVC}:  ${GREEN}运行中 ✓${NC}"
-      elif systemctl is-enabled --quiet "${LANDING_SVC}" 2>/dev/null; then
-        echo -e "    ${LANDING_SVC}:  ${YELLOW}未运行但已启用${NC}"
-      else
-        echo -e "    ${LANDING_SVC}:  ${RED}未安装 ✗${NC}"
-      fi
-    else
-      echo -e "    ${LANDING_SVC}:  ${YELLOW}未安装（首次运行会创建）${NC}"
-    fi
-    if systemctl is-enabled --quiet xray-landing-iptables-restore.service 2>/dev/null; then
-      echo -e "    iptables 持久化:   ${GREEN}已启用 ✓${NC}"
-    else
-      echo -e "    iptables 持久化: ${YELLOW}未启用${NC}"
-    fi
-  }
-
-  _check_acme(){
-    echo ""
-    echo -e "  ${BOLD}ACME/证书申请检查：${NC}"
-    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
-      echo -e "    acme.sh:          ${GREEN}已安装 ✓${NC}"
-      if crontab -l 2>/dev/null | grep -qE 'acme\.sh.*(--cron|cron)'; then
-        echo -e "    acme cron:        ${GREEN}已配置 ✓${NC}"
-      else
-        echo -e "    acme cron:        ${YELLOW}未配置${NC}"
-      fi
-    else
-      echo -e "    acme.sh:          ${YELLOW}未安装（首次申请会自动安装）${NC}"
-    fi
-  }
-
-  _check_resources(){
-    echo ""
-    echo -e "  ${BOLD}系统资源检查：${NC}"
-    local ram_mb disk_mb fd_max
-    ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || ram_mb=0
-    disk_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}') || disk_mb=0
-    fd_max=$(ulimit -n 2>/dev/null) || fd_max=0
-
-    (( ram_mb >= 512 ))       && echo -e "    内存:            ${GREEN}${ram_mb} MB ✓${NC}"       || echo -e "    内存:            ${YELLOW}${ram_mb} MB (推荐 ≥512MB)${NC}"
-
-    (( disk_mb >= 2048 ))       && echo -e "    磁盘 / 可用:     ${GREEN}${disk_mb} MB ✓${NC}"       || echo -e "    磁盘 / 可用:     ${RED}${disk_mb} MB (推荐 ≥2GB)${NC}"
-
-    (( fd_max >= 524288 ))       && echo -e "    fd 最大值:       ${GREEN}${fd_max} ✓${NC}"       || echo -e "    fd 最大值:       ${YELLOW}${fd_max} (推荐 ≥524288)${NC}"
-  }
-
-  _check_tmp(){
-    echo ""
-    echo -e "  ${BOLD}临时文件写入测试：${NC}"
-    local _t
-    _t=$(mktemp /tmp/landing-doctor-test.XXXX 2>/dev/null) && rm -f "$_t"       && echo -e "    /tmp 写入:        ${GREEN}正常 ✓${NC}"       || echo -e "    /tmp 写入:        ${RED}失败 ✗${NC}"
-    mkdir -p "${MANAGER_BASE}/tmp" 2>/dev/null
-    _t=$(mktemp "${MANAGER_BASE}/tmp/landing-doctor-test.XXXX" 2>/dev/null) && rm -f "$_t"       && echo -e "    MANAGER_BASE/tmp:  ${GREEN}正常 ✓${NC}"       || echo -e "    MANAGER_BASE/tmp:  ${RED}失败 ✗${NC}"
-  }
-
-  local _issues=0 _total=0
-
-  echo -e "  ${BOLD}① 依赖检查${NC}"
-  _check_deps; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}② 内核参数${NC}"
-  _check_kernel; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}③ Xray 二进制${NC}"
-  _check_xray; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}④ 端口可用性${NC}"
-  _check_ports; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑤ 网络连通性${NC}"
-  _check_network; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑥ 证书状态${NC}"
-  _check_cert; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑦ systemd 服务${NC}"
-  _check_service; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑧ ACME 证书申请${NC}"
-  _check_acme; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑨ 系统资源${NC}"
-  _check_resources; ((++_total)) || ((++_issues))
-
-  echo -e ""
-  echo -e "  ${BOLD}⑩ 临时文件${NC}"
-  _check_tmp; ((++_total)) || ((++_issues))
-
-  echo ""
-  echo -e "${BOLD}══════════════════════════════════════════════════════════════════${NC}"
-  if (( _issues == 0 )); then
-    echo -e "  ${GREEN}✓ 环境检查通过（$_total/$_total 项）${NC}"
-    echo -e "${BOLD}══════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    return 0
-  else
-    echo -e "  ${RED}✗ 发现 $_issues 项问题（建议修复后再安装）${NC}"
-    echo -e "${BOLD}══════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    return 1
-  fi
-}
-
-
-# [Bugfix v3.1] mktemp: 正确获取 mktemp 命令的退出状态
-# 修复: mktemp_result=$? 只捕获 "result=$(mktemp ...)" 赋值的退出码（总是0）
-# 正确做法: 在子进程中单独运行 mktemp 并捕获其退出码
+# v3.0: [BUGFIX-3] mktemp 带超时和 fallback
 _mktemp(){
   local prefix="${1:-tmp}"
   local timeout_secs="${2:-5}"
@@ -364,17 +84,18 @@ _mktemp(){
   
   local tmp_file="${dir}/.landing-mgr.${prefix}.${suffix}"
   
-  # 尝试直接 touch 创建
+  # 尝试创建
   if touch "$tmp_file" 2>/dev/null; then
     printf '%s' "$tmp_file"
     return 0
   fi
   
-  # 回退: 在独立子进程中运行 mktemp，正确捕获其退出码
+  # fallback: 使用带超时的 mktemp
   local oldopts="$-"
   set +e
-  local result mkt_status=1
-  result=$( timeout "$timeout_secs" mktemp "${dir}/.landing-mgr.${prefix}.XXXXXX" 2>/dev/null ) && mkt_status=0 || mkt_status=$?
+  local result
+  result=$(timeout "$timeout_secs" mktemp "${dir}/.landing-mgr.${prefix}.XXXXXX" 2>/dev/null)
+  local mkt_status=$?
   set -"$oldopts"
   
   if (( mkt_status == 0 )) && [[ -n "$result" && -f "$result" ]]; then
@@ -382,7 +103,7 @@ _mktemp(){
     return 0
   fi
   
-  # 最终回退: date+pid+纳秒（低概率碰撞，可接受）
+  # 最终 fallback: date+pid+random
   printf '%s/.landing-mgr.%s.%d.%s' "$dir" "$prefix" "$$" "$(date +%s%N)"
   return 0
 }
@@ -401,8 +122,7 @@ shell_quote(){
   printf "'%s'" "${s//\'/\'\\\'\'}"
 }
 
-# [Bugfix v3.1] atomic_write: 直接使用 _mktemp 的返回值，不做二次修改
-# _mktemp 保证返回有效且已存在的唯一路径，无需额外处理
+# v3.0: [架构优化] atomic_write 纯 bash 实现
 atomic_write(){
   local target="$1" mode="${2:-644}" owner_group="${3:-root:root}"
   local dir tmp
@@ -411,8 +131,8 @@ atomic_write(){
   dir="$(dirname "$target")"
   mkdir -p "$dir"
   
-  # _mktemp 总是返回已验证存在的唯一路径
   tmp="$(_mktemp "atomic" 3 "$dir")"
+  [[ -z "$tmp" ]] && { echo "atomic_write: mktemp 失败" >&2; return 1; }
   
   # stdin → 临时文件
   if ! cat >"$tmp" 2>/dev/null; then
@@ -424,7 +144,7 @@ atomic_write(){
   chmod "$mode" "$tmp" 2>/dev/null || true
   chown "$owner_group" "$tmp" 2>/dev/null || true
   
-  # mv 是原子操作
+  # 原子 mv
   if ! mv -f "$tmp" "$target" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
     echo "atomic_write: mv 失败 $tmp → $target" >&2
@@ -433,7 +153,7 @@ atomic_write(){
   return 0
 }
 
-# 全局写锁
+# v3.0: 全局写锁
 _acquire_lock(){
   mkdir -p "$TEMP_DIR"
   exec 200>"${TEMP_DIR}/landing-manager.lock" 2>/dev/null || return 1
@@ -444,9 +164,9 @@ _acquire_lock(){
 _release_lock(){
   flock -u 200 2>/dev/null || true
   exec 200>&- 2>/dev/null || true
+  exec 200>/dev/null 2>/dev/null || true
 }
 
-# [Bugfix v3.1] have_ipv6: 修正拼写错误 disable_ipvjsjs_ipv6 → disable_ipv6
 have_ipv6(){
   [[ -f /proc/net/if_inet6 ]] \
     && ip6tables -L >/dev/null 2>&1 \
@@ -561,9 +281,8 @@ validate_cf_token(){
 
 show_help(){
   cat <<HELP
-用法: bash install_landing_v3.1.sh [选项]
+用法: bash install_landing_v3.0.sh [选项]
   （无参数）        交互式安装或管理菜单
-  --doctor          环境预检（不修改任何内容）
   --uninstall       清除本脚本所有内容（不影响 mack-a）
   --status          显示当前状态
   set-port <port>   修改落地机监听端口并重启服务
@@ -638,14 +357,11 @@ check_deps(){
 
 optimize_kernel_network(){
   local bbr_conf="/etc/sysctl.d/99-landing-bbr.conf"
-  # [Bugfix v3.1] 同时检查配置文件存在 AND sysctl 实际值
-  if [[ -f "$bbr_conf" ]] && grep -q 'tcp_timestamps' "$bbr_conf" 2>/dev/null; then
-    local bbr_active
-    bbr_active="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')"
-    if [[ "$bbr_active" == "bbr" || "$bbr_active" == "bbrplus" || "$bbr_active" == "cubic" ]]; then
-      return 0
-    fi
-  fi
+  [[ -f "$bbr_conf" ]] && grep -q 'tcp_timestamps' "$bbr_conf" 2>/dev/null && {
+    sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -qi 'bbr' \
+      || warn "BBRPlus 未检测到"
+    return 0
+  }
 
   local _ram_mb; _ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _ram_mb=1024
   local _tw_max=$(( _ram_mb * 100 ))
@@ -698,35 +414,18 @@ install_xray_binary(){
   local tmp_dir; tmp_dir="$(_mktemp "xray-dl" 60)"
   mkdir -p "$tmp_dir"
 
-  # 下载 Xray + SHA256 完整性校验（失败自动重试）
-  local _dl_ok=0
-  for _try in 1 2 3; do
-    [[ $_try -gt 1 ]] && info "第 ${_try} 次尝试下载 Xray ..."
+  wget -q --timeout=30 --tries=2 -O "${tmp_dir}/xray.zip" \
+    "https://github.com/XTLS/Xray-core/releases/download/${ver}/${zip_name}" \
+    || die "下载 Xray 失败"
 
-    wget -q --timeout=60 --tries=2 -O "${tmp_dir}/xray.zip"       "https://github.com/XTLS/Xray-core/releases/download/${ver}/${zip_name}"       && _dl_ok=1 && break
-    sleep 5
-  done
-  [[ $_dl_ok -eq 1 ]] || die "下载 Xray 失败"
-
-  # SHA256 校验（从官方 sha256sums.txt 验证）
-  if wget -q -O "${tmp_dir}/sha256sums.txt"       "https://github.com/XTLS/Xray-core/releases/download/${ver}/sha256sums.txt" 2>/dev/null       && grep -qF "$zip_name" "${tmp_dir}/sha256sums.txt" 2>/dev/null; then
-    if ! ( cd "$tmp_dir" && grep -F "$zip_name" sha256sums.txt | sha256sum -c - ) 2>/dev/null; then
-      warn "SHA256 校验失败，删除并重新下载..."
-      rm -f "${tmp_dir}/xray.zip"
-      wget -q --timeout=60 --tries=3 -O "${tmp_dir}/xray.zip"         "https://github.com/XTLS/Xray-core/releases/download/${ver}/${zip_name}"         || die "重新下载 Xray 失败"
-      ( cd "$tmp_dir" && grep -F "$zip_name" sha256sums.txt | sha256sum -c - ) 2>/dev/null         || warn "SHA256 仍不匹配（网络问题可能），继续安装"
-    fi
-  else
-    warn "无法获取 SHA256 校验文件，跳过完整性验证"
+  if wget -q -O "${tmp_dir}/sha256sums.txt" \
+      "https://github.com/XTLS/Xray-core/releases/download/${ver}/sha256sums.txt" 2>/dev/null \
+      && grep -qF "$zip_name" "${tmp_dir}/sha256sums.txt"; then
+    ( cd "$tmp_dir" && grep -F "$zip_name" sha256sums.txt | sha256sum -c - ) \
+      || warn "Xray 完整性校验失败，跳过"
   fi
 
-  unzip -q "${tmp_dir}/xray.zip" xray geoip.dat geosite.dat -d "${tmp_dir}/" || die "解压 Xray 失败"
-
-  # 二次校验：验证解压后的二进制是否为有效 ELF
-  if ! file "${tmp_dir}/xray" 2>/dev/null | grep -qE 'ELF.*executable|ELF.*setuid'; then
-    rm -f "${tmp_dir}/xray.zip"
-    die "解压后的 xray 不是有效的 ELF 可执行文件（下载被劫持）"
-  fi
+  unzip -q "${tmp_dir}/xray.zip" xray geoip.dat geosite.dat -d "${tmp_dir}/" || die "解压失败"
   install -m 755 "${tmp_dir}/xray" "$LANDING_BIN"
   chown root:"$LANDING_USER" "$LANDING_BIN" 2>/dev/null || true
   
@@ -749,9 +448,8 @@ create_system_user(){
 
 _tune_nginx_worker_connections(){
   local mc="/etc/nginx/nginx.conf"
-  
-  # [Bugfix v3.1] 用 mktemp 创建备份，失败则跳过调优（不阻断）
-  local _mc_bak; _mc_bak="$(mktemp /tmp/nginx-conf-backup.XXXXXX.conf 2>/dev/null)" && cp -a "$mc" "$_mc_bak" 2>/dev/null || { _mc_bak=""; }
+  local _mc_bak; _mc_bak="$(_mktemp "nginx-conf-snap" 3)"
+  cp -a "$mc" "$_mc_bak" 2>/dev/null || { warn "nginx.conf snapshot failed"; return 0; }
 
   local _tmc_ram_mb; _tmc_ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _tmc_ram_mb=1024
   local _tmc_fd=$(( _tmc_ram_mb * 800 ))
@@ -766,7 +464,7 @@ _tune_nginx_worker_connections(){
     fi
   fi
 
-  if ! grep -qE "^\s*worker_rlimit_nofile\s+${_tmc_fd}\s*;" "$mc" 2>/dev/null; then
+  if ! grep -qE "^worker_rlimit_nofile\s+${_tmc_fd}\s*;" "$mc" 2>/dev/null; then
     if grep -qE '^\s*worker_rlimit_nofile' "$mc" 2>/dev/null; then
       sed -i "s/^.*worker_rlimit_nofile.*/worker_rlimit_nofile ${_tmc_fd};/" "$mc"
     else
@@ -775,8 +473,7 @@ _tune_nginx_worker_connections(){
   fi
 
   if ! nginx -t 2>/dev/null; then
-    [[ -n "$_mc_bak" && -f "$_mc_bak" ]] && cp -f "$_mc_bak" "$mc" 2>/dev/null || true
-    rm -f "$_mc_bak" 2>/dev/null || true
+    cp -f "$_mc_bak" "$mc" 2>/dev/null || die "nginx.conf restore FAILED"
     die "nginx.conf tuning failed"
   fi
   rm -f "$_mc_bak" 2>/dev/null || true
@@ -831,9 +528,7 @@ FDEOF
   nginx -t 2>&1 || die "Nginx fallback 配置验证失败"
 
   if systemctl is-active --quiet nginx 2>/dev/null; then
-    if ! systemctl reload nginx 2>/dev/null && ! nginx -s reload 2>/dev/null; then
-      warn "Nginx reload 失败，但配置已写入"
-    fi
+    systemctl reload nginx
   else
     systemctl enable nginx || die "nginx enable failed"
     systemctl start nginx || die "Nginx 启动失败"
@@ -844,55 +539,25 @@ FDEOF
 _write_cert_reload_script(){
   atomic_write "$CERT_RELOAD_SCRIPT" 755 root:root <<'RELOAD_EOF'
 #!/bin/sh
-# v3.2: [Bugfix] 使用 flock 替代 ps 检查，实现进程级互斥
 set -eu
 CERT_DIR="${1:-}"
 [ -n "$CERT_DIR" ] || exit 0
-LOCKFILE="${CERT_DIR}/.reload.lock"
+chown -R root:xray-landing "$CERT_DIR" 2>/dev/null || true
+chmod 750 "$CERT_DIR" 2>/dev/null || true
+chmod 644 "$CERT_DIR/cert.pem" "$CERT_DIR/fullchain.pem" 2>/dev/null || true
+chmod 640 "$CERT_DIR/key.pem" 2>/dev/null || true
 
-# 文件锁：防止并发 reload（acme.sh 续期可能同时触发多个 reload）
-(
-  flock -w 30 9 || { echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: reload locked, skipping" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 0; }
-  
-  # 严格权限设置（失败则报警，不静默忽略）
-  chown -R root:xray-landing "$CERT_DIR" || { echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: chown 失败" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1; }
-  chmod 750 "$CERT_DIR" || { echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: chmod 750 失败" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1; }
-  chmod 644 "$CERT_DIR/cert.pem" "$CERT_DIR/fullchain.pem" || { echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: chmod 644 失败" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1; }
-  chmod 640 "$CERT_DIR/key.pem" || { echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: chmod 640 失败" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1; }
+if ! /bin/systemctl is-active --quiet xray-landing.service 2>/dev/null; then
+  exit 0
+fi
 
-  # 权限验证：确认 xray-landing 用户能读证书（防止 chmod 被 ACL/SELinux 阻止）
-  if ! runuser -u xray-landing -- test -r "$CERT_DIR/fullchain.pem" 2>/dev/null; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: xray-landing 无法读取证书，权限异常" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1
+if openssl x509 -checkend 86400 -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null; then
+  if ! /bin/systemctl reload xray-landing.service 2>/dev/null; then
+    /bin/systemctl restart xray-landing.service 2>/dev/null || true
   fi
-  if ! runuser -u xray-landing -- test -r "$CERT_DIR/key.pem" 2>/dev/null; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: xray-landing 无法读取私钥，权限异常" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1
-  fi
-
-  if ! /bin/systemctl is-active --quiet xray-landing.service 2>/dev/null; then
-    exit 0
-  fi
-
-  # 【关键】强制同步文件系统缓存，确保证书完全写入磁盘后再 reload
-  # 否则 nginx 可能在 acme.sh 写盘过程中 reload，导致读取不完整的 PEM
-  sync "$CERT_DIR" 2>/dev/null || true
-  sync "$CERT_DIR/cert.pem" 2>/dev/null || true
-  sync "$CERT_DIR/key.pem" 2>/dev/null || true
-  sync "$CERT_DIR/fullchain.pem" 2>/dev/null || true
-
-  # reload 前额外校验证书内容完整性（防止磁盘写入不完整）
-  if ! openssl x509 -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null      || ! openssl rsa -check -in "$CERT_DIR/key.pem" 2>/dev/null; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: 证书文件损坏，终止 reload" >> /var/log/acme-xray-landing-renew.log 2>/dev/null
-    exit 1
-  fi
-
-  # 检查证书剩余有效期（>24小时才 reload，否则保留旧进程）
-  if openssl x509 -checkend 86400 -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null; then
-    # restart > reload（restart 确保 nginx 重新读取证书，reload 可能用缓存）
-    /bin/systemctl restart xray-landing.service 2>/dev/null       || { echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: 服务 restart 失败" >> /var/log/acme-xray-landing-renew.log 2>/dev/null; exit 1; }
-  else
-    echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: 证书续期后校验失败，保留旧进程态" >> /var/log/acme-xray-landing-renew.log 2>/dev/null || true
-  fi
-) 9>"$LOCKFILE"
+else
+  echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: 证书续期后校验失败，保留旧进程态" >> /var/log/acme-xray-landing-renew.log 2>/dev/null || true
+fi
 RELOAD_EOF
 }
 
@@ -929,8 +594,7 @@ issue_certificate(){
       if [[ -f "${_home_acme}/acme.sh" ]]; then
         warn "acme.sh 安装到了 ${_home_acme}，迁移..."
         mkdir -p "$ACME_HOME"
-        # [Bugfix v3.1] 修正路径拼接错误: $ACME_HOME}/ → $ACME_HOME/
-        cp -rp "${_home_acme}/." "${ACME_HOME}/" 2>/dev/null || cp -rp "${_home_acme}/." "${ACME_HOME}/" || true
+        cp -rp "${_home_acme}/." "$ACME_HOME}/"
         rm -rf "${_home_acme}"
       fi
     fi
@@ -993,7 +657,6 @@ issue_certificate(){
   success "证书自动续期已配置"
 }
 
-# [Bugfix v3.1] sync_xray_config: 添加 LANDING_BASE 到 export 列表
 sync_xray_config(){
   info "同步 Xray 配置..."
   load_manager_config
@@ -1021,8 +684,6 @@ sync_xray_config(){
     export _TROJAN_GRPC_PORT="$TROJAN_GRPC_PORT"
     export _VLESS_WS_PORT="$VLESS_WS_PORT"
     export _TROJAN_TCP_PORT="$TROJAN_TCP_PORT"
-    # [Bugfix v3.1] 添加 LANDING_BASE 到 export
-    export _LANDING_BASE="$LANDING_BASE"
     
     python3 - <<'PYEOF'
 import json, os, glob, uuid as _uuid, random as _rand
@@ -1044,8 +705,7 @@ if not (_vg and _tg and _vw and _tt):
     _vg, _tg, _vw, _tt = _base, _base+1, _base+2, _base+3
 
 nodes_dir = os.environ['_NODES_DIR']
-cert_base = os.environ.get('_CERT_BASE', '')
-landing_base = os.environ.get('_LANDING_BASE', '/etc/xray-landing')
+cert_base = os.environ['_CERT_BASE']
 
 trojan_clients = []
 certs_dict = {}
@@ -1162,7 +822,7 @@ cfg = {
     }
 }
 
-tmp = os.path.join(os.environ.get('_CFG_OUT', os.path.join(landing_base, 'config.json')) + '.tmp')
+tmp = os.path.join(os.environ['_CFG_OUT'] + '.tmp')
 with open(tmp, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 os.replace(tmp, os.environ['_CFG_OUT'])
@@ -1271,7 +931,6 @@ LimitNOFILE=${_svc_fd}
 TasksMax=infinity
 XRAYLIMITS
 
-  # [Bugfix v3.1] recovery service: 使用 flock -E 避免子 shell 退出码干扰
   atomic_write /etc/systemd/system/xray-landing-recovery.service 644 root:root <<'RECEOF'
 [Unit]
 Description=Xray Landing Recovery
@@ -1279,30 +938,28 @@ DefaultDependencies=no
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '
-  mkdir -p /run/lock 2>/dev/null;
-  lockfile="/run/lock/xray-landing-recovery.lock";
-  tsfile="/run/lock/xray-landing-recovery.last";
-  (
-    flock -w 60 -E 0 9 || exit 0;
-    now=$(date +%s);
-    if [ -f "$tsfile" ]; then
-      last=$(cat "$tsfile" 2>/dev/null || echo 0);
-      delta=$((now - last));
-      if [ "$delta" -lt 1800 ]; then
-        logger -t xray-landing-recovery "Recovery rate-limited";
-        exit 0;
-      fi;
-    fi;
-    echo "$now" > "$tsfile";
-    cert_ok=0; cfg_ok=0;
-    for d in ${CERT_BASE}/*/fullchain.pem; do [ -f "$d" ] && cert_ok=1 && break; done;
-    python3 -c "import json,sys; json.load(open(sys.argv[1]))" ${LANDING_CONF} 2>/dev/null && cfg_ok=1 || true;
-    if [ "$cert_ok" = "1" ] && [ "$cfg_ok" = "1" ]; then
-      systemctl reset-failed ${LANDING_SVC} 2>/dev/null || true;
-      systemctl start ${LANDING_SVC} 2>/dev/null || true;
-    fi
-  ) 9>"$lockfile"
+ExecStart=/bin/sh -c '\
+  mkdir -p /run/lock 2>/dev/null; \
+  lockfile="/run/lock/xray-landing-recovery.lock"; \
+  tsfile="/run/lock/xray-landing-recovery.last"; \
+  ( flock -n 9 || exit 0; \
+    now=$(date +%s); \
+    if [ -f "$tsfile" ]; then \
+      last=$(cat "$tsfile" 2>/dev/null || echo 0); \
+      delta=$((now - last)); \
+      if [ "$delta" -lt 1800 ]; then \
+        logger -t xray-landing-recovery "Recovery rate-limited"; exit 0; \
+      fi; \
+    fi; \
+    echo "$now" > "$tsfile"; \
+    cert_ok=0; cfg_ok=0; \
+    for d in ${CERT_BASE}/*/fullchain.pem; do [ -f "$d" ] && cert_ok=1 && break; done; \
+    python3 -c "import json,sys; json.load(open(sys.argv[1]))" ${LANDING_CONF} 2>/dev/null && cfg_ok=1 || true; \
+    if [ "$cert_ok" = "1" ] && [ "$cfg_ok" = "1" ]; then \
+      systemctl reset-failed ${LANDING_SVC} 2>/dev/null || true; \
+      systemctl start ${LANDING_SVC} 2>/dev/null || true; \
+    fi \
+  ) 9>"$lockfile" \
 '
 RECEOF
 
@@ -1390,12 +1047,6 @@ setup_firewall(){
     info "  ACCEPT ← ${tip}/32:${LANDING_PORT}"; (( ++count )) || true
   done < <(printf '%s\n' "${tips[@]+${tips[@]}}" | sort -u)
 
-  # [Bugfix v3.1] 如果没有中转 IP（初始状态），给出警告但不阻断
-  if (( count == 0 )); then
-    warn "无中转 IP：防火墙将只允许 SSH + 落地端口自身"
-    info "添加第一个节点后防火墙规则会自动更新"
-  fi
-
   iptables -A "$FW_TMP" -j DROP
   iptables -I INPUT 1 -m comment --comment "xray-landing-swap" -j "$FW_TMP"
   _bulldoze_input_refs "$FW_CHAIN"
@@ -1431,35 +1082,15 @@ _persist_iptables(){
   local fw_script="${MANAGER_BASE}/firewall-restore.sh"
   local transit_ips=()
   
-  # 动态收集当前所有落地节点 IP（运行时读取，不依赖生成时刻快照）
-  _load_transit_ips(){
-    local _meta _tip
-    for _meta in "${MANAGER_BASE}/nodes"/*.conf; do
-      [ -f "$_meta" ] || continue
-      _tip=$(grep '^TRANSIT_IP=' "$_meta" 2>/dev/null | cut -d= -f2- || true)
-      [ -n "$_tip" ] || continue
-      # 验证 IP 格式有效性
-      python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])" "$_tip" 2>/dev/null || continue
-      printf '%s\n' "$_tip"
-    done
-  }
-  transit_ips=( $(_load_transit_ips | sort -u) )
+  while IFS= read -r meta; do
+    [[ -f "$meta" ]] || continue
+    local tip; tip=$(grep '^TRANSIT_IP=' "$meta" 2>/dev/null | cut -d= -f2-) || continue
+    python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])" "$tip" 2>/dev/null && transit_ips+=("$tip") || true
+  done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name "tmp-*.conf" -type f 2>/dev/null | sort)
 
   atomic_write "$fw_script" 700 root:root <<FWEOF
 #!/bin/sh
 # LANDING_FW_VERSION=${VERSION}_\$(date +%Y%m%d)
-
-# 运行时读取 LANDING_PORT（支持端口变更后热生效）
-MANAGER_CONF="${MANAGER_BASE}/manager.conf"
-if [ -f "$MANAGER_CONF" ]; then
-  _lp=$(grep '^LANDING_PORT=' "$MANAGER_CONF" 2>/dev/null | cut -d= -f2- || echo "8443")
-  case "$_lp" in
-    [0-9]*) LANDING_PORT="$_lp" ;;
-    *) LANDING_PORT="8443" ;;
-  esac
-else
-  LANDING_PORT="8443"
-fi
 _detect_ssh(){
   local p="\$(sshd -T 2>/dev/null | awk '/^port /{print \$2; exit}' || true)"
   [ -z "\$p" ] && p="\$(ss -tlnp 2>/dev/null | awk '/sshd/{for(i=1;i<=NF;i++) if(\$i~/:[0-9]+\$/){sub(/^.*:/,\"\",\$i);print \$i;exit}}' | head -1 || true)"
@@ -1631,6 +1262,8 @@ NEOF_TMP
     ( sync_xray_config ) 2>/dev/null || true
     _release_lock; die "防火墙配置失败"
   fi
+
+  trap - INT TERM
   systemctl restart "$LANDING_SVC"
   sleep 1
 
@@ -1678,29 +1311,25 @@ delete_node(){
 
   _acquire_lock
 
-  local _bak_conf="${DEL_CONF}.bak.$(date +%s)"
-  cp -f "$DEL_CONF" "$_bak_conf" 2>/dev/null || true
+  mv -f "$DEL_CONF" "${DEL_CONF}.deleting" 2>/dev/null || true
 
   if ! ( sync_xray_config ); then
-    mv -f "$_bak_conf" "$DEL_CONF" 2>/dev/null || true
+    mv -f "${DEL_CONF}.deleting" "$DEL_CONF" 2>/dev/null || true
     _release_lock; die "Xray配置同步失败"
   fi
 
   if ! ( setup_firewall ); then
-    mv -f "$_bak_conf" "$DEL_CONF" 2>/dev/null || true
+    mv -f "${DEL_CONF}.deleting" "$DEL_CONF" 2>/dev/null || true
     ( sync_xray_config ) 2>/dev/null || true
     _release_lock; die "防火墙更新失败"
   fi
 
-  rm -f "$_bak_conf" 2>/dev/null || true
   systemctl restart "$LANDING_SVC"
   sleep 1
 
-  # [Bugfix v3.7] 真正删除节点文件（v3.6 只删备份，从未删过实际文件）
-  rm -f "${DEL_CONF}" 2>/dev/null || true
   rm -f "${DEL_CONF}.deleting" 2>/dev/null || true
   _release_lock
-  success "节点已彻底删除（文件 + 防火墙规则）"
+  success "节点已删除"
 }
 
 do_set_port(){
@@ -1821,7 +1450,7 @@ print_pairing_info(){
 import json, base64, sys
 ip, dom, port, uuid, pwd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 d = {'ip': ip, 'dom': dom, 'port': port, 'uuid': uuid, 'pwd': pwd, 'pfx': uuid[:8]}
-print(base64.b64encode(json.dumps(d, separators=(',',':')).encode()).decode())
+print(base64.b64encode(json.dumps(d, separators=(',',':')).decode())
 TOKPY
 ) || { warn "token 生成异常"; token=""; }
 
@@ -1836,7 +1465,7 @@ TOKPY
   echo "╚══════════════════════════════════════════════════════════════════╝"
   echo -e "${NC}"
   [[ -n "$token" ]] \
-    && echo -e "  ${BOLD}${CYAN}bash install_transit_v3.1.sh --import ${token}${NC}" \
+    && echo -e "  ${BOLD}${CYAN}bash install_transit_v3.0.sh --import ${token}${NC}" \
     || warn "  token 生成失败"
 }
 
@@ -1912,7 +1541,6 @@ main(){
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then show_help; exit 0; fi
   if [[ "${1:-}" == "set-port" ]]; then do_set_port "${2:-}"; exit $?; fi
   if [[ "${1:-}" == "--status" ]]; then show_status; exit $?; fi
-  if [[ "${1:-}" == "--doctor" ]]; then _doctor; exit $?; fi
 
   if [[ -f "$INSTALLED_FLAG" ]]; then
     installed_menu
