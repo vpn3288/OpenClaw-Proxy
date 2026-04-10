@@ -6,10 +6,16 @@
 
 | 文件 | 版本 | 说明 |
 |------|------|------|
-| `install_transit_v3.1.sh` | v3.9 | 中转机安装脚本（Transit） |
-| `install_landing_v3.1.sh` | v3.9 | 落地机安装脚本（Landing） |
+| `install_transit_v3.1.sh` | v3.10 | 中转机安装脚本（Transit） |
+| `install_landing_v3.1.sh` | v3.10 | 落地机安装脚本（Landing） |
 | `original/zhongzhuan.sh` | v2.50-Optimized | 原始中转机脚本 |
 | `original/luodi.sh` | v2.50 | 原始落地机脚本 |
+
+## v3.10 修复
+
+| # | 问题 | 说明 |
+|---|------|------|
+| 18 | `_mktemp` 可预测纳秒 fallback | 移除了 `date +%s%N` fallback，改为失败报错（防止 VM 环境中路径预测攻击） |
 
 ## v3.9 修复
 
@@ -51,14 +57,14 @@
 
 ```bash
 bash install_transit_v3.1.sh
-bash install_transit_v3.1.sh --doctor    # 预检
-bash install_transit_v3.1.sh --uninstall # 卸载
+bash install_transit_v3.1.sh --doctor
+bash install_transit_v3.1.sh --uninstall
 ```
 
 ### 落地机（Landing）
 
 ```bash
 bash install_landing_v3.1.sh
-bash install_landing_v3.1.sh --doctor    # 预检
-bash install_landing_v3.1.sh --uninstall # 卸载
+bash install_landing_v3.1.sh --doctor
+bash install_landing_v3.1.sh --uninstall
 ```
