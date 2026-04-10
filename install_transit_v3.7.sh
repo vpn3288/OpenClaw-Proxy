@@ -8,7 +8,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.7"
+readonly VERSION="v3.8"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -514,16 +514,6 @@ check_deps(){
 
 optimize_kernel_network(){
   local bbr_conf="/etc/sysctl.d/99-transit-bbr.conf"
-  # [Bugfix v3.1] 同时检查配置文件存在 AND sysctl 实际值
-  if [[ -f "$bbr_conf" ]] && grep -q 'tcp_timestamps' "$bbr_conf" 2>/dev/null; then
-    # 验证 sysctl 实际值
-    local bbr_active
-    bbr_active="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')"
-    if [[ "$bbr_active" == "bbr" || "$bbr_active" == "bbrplus" || "$bbr_active" == "cubic" ]]; then
-      return 0
-    fi
-    # 文件存在但值不对，继续重新写入
-  fi
 
   info "优化内核并发参数..."
 
@@ -552,6 +542,8 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.tcp_timestamps=1
 net.ipv4.tcp_fastopen=3
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
 BBRCF
 
   echo "options nf_conntrack hashsize=262144" > /etc/modprobe.d/nf_conntrack.conf 2>/dev/null || true

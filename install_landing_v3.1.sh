@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.7"
+readonly VERSION="v3.8"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -638,14 +638,6 @@ check_deps(){
 
 optimize_kernel_network(){
   local bbr_conf="/etc/sysctl.d/99-landing-bbr.conf"
-  # [Bugfix v3.1] 同时检查配置文件存在 AND sysctl 实际值
-  if [[ -f "$bbr_conf" ]] && grep -q 'tcp_timestamps' "$bbr_conf" 2>/dev/null; then
-    local bbr_active
-    bbr_active="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')"
-    if [[ "$bbr_active" == "bbr" || "$bbr_active" == "bbrplus" || "$bbr_active" == "cubic" ]]; then
-      return 0
-    fi
-  fi
 
   local _ram_mb; _ram_mb=$(free -m 2>/dev/null | awk '/Mem:/{print $2}') || _ram_mb=1024
   local _tw_max=$(( _ram_mb * 100 ))
@@ -672,6 +664,8 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.tcp_timestamps=1
 net.ipv4.tcp_fastopen=3
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
 BBRCF
 
   echo "options nf_conntrack hashsize=262144" > /etc/modprobe.d/99-landing-conntrack.conf 2>/dev/null || true
@@ -1209,6 +1203,33 @@ LREOF
 SystemMaxUse=200M
 RuntimeMaxUse=50M
 JDEOF
+
+  # [v3.8 增强] SSH 登录时证书濒死红色告警（当 acme.sh 静默失败时救命）
+  local _cert_alert="/etc/profile.d/xray-cert-alert.sh"
+  mkdir -p /etc/profile.d
+  atomic_write "$_cert_alert" 755 root:root <<'CERTEOF'
+#!/bin/bash
+# v3.8: 当证书剩余 ≤7 天时 SSH 登录显示红色警告
+CERT_BASE="'${CERT_BASE}'
+_alert_days=7
+if [[ -d "$CERT_BASE" ]]; then
+  for cert in "$CERT_BASE"/*/fullchain.pem; do
+    [[ -f "$cert" ]] || continue
+    days=$(openssl x509 -in "$cert" -noout -days 2>/dev/null | awk -F'= ' '{print $2}')
+    if [[ "$days" =~ ^[0-9]+$ ]] && (( days <= _alert_days )); then
+      domain="${cert%/*}"; domain="${domain##*/}"
+      echo -e "'\033[0;31m'
+      echo "═══════════════════════════════════════════════════"
+      echo "  ⚠  证书濒死警告  ⚠"
+      echo "  域名: $domain"
+      echo "  剩余: ${days} 天（≤${_alert_days} 天告警阈值）"
+      echo "  建议: 手动执行: bash install_landing_v3.1.sh --doctor"
+      echo "═══════════════════════════════════════════════════"
+      echo -e "'\033[0m'
+    fi
+  done
+fi
+CERTEOF
   success "logrotate 已配置"
 }
 
@@ -1238,10 +1259,12 @@ ExecStart=${LANDING_BIN} run -config ${LANDING_CONF}
 Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray-landing
 Restart=on-failure
 RestartSec=15s
-LimitNOFILE=${_svc_fd}
+LimitNOFILE=${_svc_fd}:${_svc_fd}
 LimitNPROC=65535
 TasksMax=infinity
 ProtectSystem=strict
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ProtectHome=true
 ReadOnlyPaths=${LANDING_BASE} /usr/local/share/xray-landing ${CERT_BASE}
 ReadWritePaths=${LANDING_LOG}
@@ -1267,7 +1290,7 @@ SVCEOF
   mkdir -p /etc/systemd/system/xray-landing.service.d
   atomic_write /etc/systemd/system/xray-landing.service.d/limits.conf 644 root:root <<XRAYLIMITS
 [Service]
-LimitNOFILE=${_svc_fd}
+LimitNOFILE=${_svc_fd}:${_svc_fd}
 TasksMax=infinity
 XRAYLIMITS
 
