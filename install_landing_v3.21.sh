@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1;1m'; NC='\033[0m'
-readonly VERSION="v3.21"
+readonly VERSION="v3.22"
 
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}     $*"; }
@@ -1040,7 +1040,7 @@ tls_settings = {
 
 cfg = {
     "log": {"access": "none", "error": "none", "loglevel": "warning"},
-    "inbounds": [
+        "inbounds": [
         {
             "listen": "0.0.0.0", "port": landing_port, "protocol": "vless",
             "settings": {
@@ -1061,22 +1061,55 @@ cfg = {
             "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": f"{PFX}-vg"}},
             "sniffing": {"enabled": False}
         },
+        {
+            "listen": "127.0.0.1", "port": PORT_VLESS_WS, "protocol": "vless",
+            "settings": {"clients": [{"id": vless_uuid, "level": 0, "email": "vless-ws@inner"}], "decryption": "none"},
+            "streamSettings": {"network": "ws", "wsSettings": {"path": f"/{PFX}-vw"}, "acceptProxyProtocol": False},
+            "sniffing": {"enabled": False}
+        },
+        {
+            "listen": "127.0.0.1", "port": PORT_TROJAN_TCP, "protocol": "trojan",
+            "settings": {"clients": trojan_clients},
+            "streamSettings": {"network": "tcp", "acceptProxyProtocol": False},
+            "sniffing": {"enabled": False}
+        }
+    ],
 
-tmp = os.path.join(os.environ.get('_CFG_OUT', os.path.join(landing_base, 'config.json')) + '.tmp')
-with open(tmp, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, indent=2, ensure_ascii=False)
-os.replace(tmp, os.environ['_CFG_OUT'])
-print(f"  [OK] {len(trojan_clients)} Trojan 客户端, {len(certs_dict)} 证书")
+    "dns": {
+        "servers": ["https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query", "localhost"],
+        "queryStrategy": "UseIP"
+    },
+    "outbounds": [
+        {"protocol": "dns", "tag": "dns-out", "settings": {"address": "1.1.1.1", "port": 53}},
+        {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "AsIs"}},
+        {"protocol": "blackhole", "tag": "blocked", "settings": {"response": {"type": "none"}}}
+    ],
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"},
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
+            {"type": "field", "port": "25", "outboundTag": "blocked"},
+            {"type": "field", "port": "53", "network": "udp,tcp", "outboundTag": "dns-out"}
+        ]
+    },
+    "policy": {
+        "levels": {"0": {"handshakeTimeout": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 5, "bufferSize": 64}},
+        "system": {"statsInboundUplink": False, "statsInboundDownlink": False}
+    }
+}
+
 PYEOF
   ) || py_exit=$?
   [[ $py_exit -eq 0 ]] || die "sync_xray_config 失败"
-  
+
   chown -R root:"$LANDING_USER" "$LANDING_BASE" \
     || die "chown LANDING_BASE failed"
   chmod 750 "$LANDING_BASE"
   chmod 640 "$LANDING_CONF"
   success "Xray 配置同步完成"
 }
+
 
 write_logrotate(){
   atomic_write "$LOGROTATE_FILE" 644 root:root <<LREOF
