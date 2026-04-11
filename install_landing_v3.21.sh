@@ -1907,6 +1907,19 @@ main(){
     install_xray_binary
     create_system_user
     create_systemd_service
+    # [Bugfix] 在 add_node 之前先创建默认 manager.conf
+    mkdir -p "$MANAGER_BASE"
+    cat > "$MANAGER_CONFIG" <<MCEOF
+LANDING_PORT=${LANDING_PORT:-8443}
+VLESS_UUID=$(uuidgen)
+VLESS_GRPC_PORT=27580
+TROJAN_GRPC_PORT=27581
+VLESS_WS_PORT=27582
+TROJAN_TCP_PORT=27583
+CF_TOKEN=${CF_TOKEN:-}
+CREATED_USER=${LANDING_USER}
+MCEOF
+
     touch "$INSTALLED_FLAG"
     echo ""
     success "══ 落地机安装完成！══"
