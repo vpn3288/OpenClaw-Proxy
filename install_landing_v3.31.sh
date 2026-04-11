@@ -988,7 +988,7 @@ cfg = {
     },
     "policy": {
         "levels": {"0": {"handshakeTimeout": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 5, "bufferSize": 64}},
-        "system": {"statsInboundUplink": False, "statsInboundDownlink": False, " uplinkOnly": 0}}
+        "system": {"statsInboundUplink": False, "statsInboundDownlink": False, "uplinkOnly": 0}}
     }
 
     with open(os.environ['_CFG_OUT'], 'w') as f:
