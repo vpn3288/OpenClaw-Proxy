@@ -1287,14 +1287,18 @@ RECEOF
   systemctl daemon-reload \
     || die "daemon-reload 失败"
   systemctl enable "$LANDING_SVC"
-  systemctl restart "$LANDING_SVC"
-  sleep 2
-
-  if systemctl is-active --quiet "$LANDING_SVC"; then
-    success "服务 ${LANDING_SVC} 已启动"
+  # [Bugfix] 全新安装时不立即启动服务，等 add_node 生成 config.json 后再启动
+  if [[ -f "${LANDING_CONF}" ]]; then
+    systemctl restart "$LANDING_SVC"
+    sleep 2
+    if systemctl is-active --quiet "$LANDING_SVC"; then
+      success "服务 ${LANDING_SVC} 已启动"
+    else
+      journalctl -u "$LANDING_SVC" --no-pager -n 30
+      die "服务启动失败"
+    fi
   else
-    journalctl -u "$LANDING_SVC" --no-pager -n 30
-    die "服务启动失败"
+    info "服务已注册，配置将在添加节点后启动"
   fi
 }
 
