@@ -895,7 +895,7 @@ issue_certificate(){
   local issued=0
   for try in 1 2; do
     CF_Token="$cf_token" env ACME_HOME="$ACME_HOME" "${ACME_HOME}/acme.sh" \
-      --issue --dns dns_cf --domain "$domain" --keylength ec-256 \
+      --issue --dns dns_cf --server https://acme-v02.api.letsencrypt.org/directory --domain "$domain" --keylength ec-256 \
       --dnssleep 40 --force \
       && issued=1 && break || true
     (( try < 2 )) && { warn "第 ${try} 次申请失败，等待后重试..."; sleep 30; }
