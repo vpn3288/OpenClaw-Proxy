@@ -122,7 +122,7 @@ _doctor(){
 
     if ss -tlnp 2>/dev/null | grep -q ':443 '; then
       echo -e "    中转监听 443:   ${RED}已被占用！${NC}"
-      ss -tlnp 2>/dev/null | grep ':443 ' | head-3 | sed 's/^/      /'
+      ss -tlnp 2>/dev/null | grep ':443 ' | head -3 | sed 's/^/      /'
     else
       echo -e "    中转监听 443:   ${GREEN}可用 ✓${NC}"
     fi
