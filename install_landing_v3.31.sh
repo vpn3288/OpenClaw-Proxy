@@ -31,7 +31,7 @@ readonly FW_CHAIN="XRAY-LANDING"
 readonly FW_CHAIN6="XRAY-LANDING-v6"
 readonly LOGROTATE_FILE="/etc/logrotate.d/xray-landing"
 readonly TEMP_DIR="${MANAGER_BASE}/tmp"
-readonly LOCK_FD=200
+LOCK_FD=200
 
 [[ $EUID -eq 0 ]] || die "必须以 root 身份运行"
 

@@ -29,7 +29,7 @@ readonly FW_CHAIN6="TRANSIT-MANAGER-v6"
 readonly LOG_DIR="/var/log/transit-manager"
 readonly LOGROTATE_FILE="/etc/logrotate.d/transit-manager"
 readonly TEMP_DIR="${MANAGER_BASE}/tmp"
-readonly LOCK_FD=200
+LOCK_FD=200
 
 [[ $EUID -eq 0 ]] || die "必须以 root 身份运行"
 
