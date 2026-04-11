@@ -121,7 +121,7 @@ _doctor(){
     else
       echo -e "    ${LANDING_BIN}: ${RED}未安装 ✗${NC}"
     fi
-    if [[ -f /usr/local/bin/geoip.dat ]]; then
+    if [[ -f /usr/local/share/xray-landing/geoip.dat ]]; then
       echo -e "    geoip.dat:       ${GREEN}存在 ✓${NC}"
     else
       echo -e "    geoip.dat:       ${YELLOW}缺失（首次安装会自动下载）${NC}"
@@ -724,9 +724,8 @@ install_xray_binary(){
   install -m 755 "${tmp_dir}/xray" "$LANDING_BIN"
   chown root:"$LANDING_USER" "$LANDING_BIN" 2>/dev/null || true
   
-  # [Bugfix] geoip.dat 必须与 xray 二进制在同一目录或 /usr/local/bin/
-  install -m 644 "${tmp_dir}/geoip.dat"   /usr/local/bin/geoip.dat
-  install -m 644 "${tmp_dir}/geosite.dat" /usr/local/bin/geosite.dat
+  install -m 644 "${tmp_dir}/geoip.dat"   /usr/local/share/xray-landing/geoip.dat
+  install -m 644 "${tmp_dir}/geosite.dat" /usr/local/share/xray-landing/geosite.dat
 
   rm -rf "$tmp_dir"
   success "Xray 安装完成: ${LANDING_BIN} (${ver})"
