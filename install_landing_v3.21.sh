@@ -724,6 +724,7 @@ install_xray_binary(){
   install -m 755 "${tmp_dir}/xray" "$LANDING_BIN"
   chown root:"$LANDING_USER" "$LANDING_BIN" 2>/dev/null || true
   
+  mkdir -p /usr/local/share/xray-landing
   install -m 644 "${tmp_dir}/geoip.dat"   /usr/local/share/xray-landing/geoip.dat
   install -m 644 "${tmp_dir}/geosite.dat" /usr/local/share/xray-landing/geosite.dat
 
