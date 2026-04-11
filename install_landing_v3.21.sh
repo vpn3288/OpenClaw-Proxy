@@ -1595,12 +1595,13 @@ CREATED=$(date +%Y%m%d_%H%M%S)
 NEOF_TMP
   chmod 600 "$_tmp_node"
 
+  # [Bugfix] 先移动节点文件到正式位置，再同步配置
+  mv -f "$_tmp_node" "$_node_conf"
+
   if ! ( sync_xray_config ); then
-    rm -f "$_tmp_node" "${_staged_mgr:-}" 2>/dev/null
+    rm -f "$_node_conf" "${_staged_mgr:-}" 2>/dev/null
     _release_lock; die "Xray配置同步失败"
   fi
-
-  mv -f "$_tmp_node" "$_node_conf"
 
   if ! ( setup_firewall ); then
     rm -f "$_node_conf"
